@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>South American mCDR Research Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root { --ink:#18323b; --muted:#5b7077; --line:#dbe4e6; --panel:#fff; --bg:#f3f7f6; }
+    * { box-sizing:border-box }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--ink); background:var(--bg); }
+    header { padding:22px 26px 16px; background:#fff; border-bottom:1px solid var(--line); }
+    h1 { margin:0 0 6px; font-size:clamp(22px,3vw,32px); }
+    .sub { margin:0; color:var(--muted); line-height:1.45; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; padding:14px 20px; background:#fff; border-bottom:1px solid var(--line); align-items:end; }
+    .field { display:flex; flex-direction:column; gap:5px; min-width:165px; }
+    label { font-size:12px; color:var(--muted); font-weight:650; }
+    select,input { padding:9px 10px; border:1px solid #cbd8da; border-radius:8px; background:#fff; color:var(--ink); min-width:160px; }
+    button { padding:9px 13px; border:1px solid #cbd8da; border-radius:8px; background:#fff; cursor:pointer; color:var(--ink); }
+    button:hover { background:#edf4f3; }
+    .status { margin-left:auto; align-self:center; color:var(--muted); font-size:13px; }
+    #map { height: min(72vh, 780px); min-height:440px; width:100%; }
+    footer { padding:12px 22px 22px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .popup h3 { margin:0 0 7px; font-size:16px; }
+    .popup p { margin:5px 0; line-height:1.4; }
+    .popup .meta { color:#536970; font-size:12px; }
+    .popup a { color:#126b78; }
+    .legend { display:flex; gap:14px; flex-wrap:wrap; padding:10px 22px; background:#fff; border-bottom:1px solid var(--line); font-size:12px; color:var(--muted); }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:middle; background:#287c8e; }
+    .error { color:#9b2c2c; }
+    @media(max-width:650px) { .status { width:100%; margin-left:0; } #map { min-height:520px; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>South American mCDR Research Map</h1>
+  <p class="sub">A living inventory of marine carbon dioxide removal research, enabling science, monitoring and related activities across South America.</p>
+</header>
+<section class="toolbar" aria-label="Map filters">
+  <div class="field"><label for="search">Search projects</label><input id="search" type="search" placeholder="Project, institution, contact…"></div>
+  <div class="field"><label for="country">Country</label><select id="country"><option value="">All countries</option></select></div>
+  <div class="field"><label for="category">Research category</label><select id="category"><option value="">All categories</option></select></div>
+  <div class="field"><label for="approach">mCDR approach</label><select id="approach"><option value="">All approaches</option></select></div>
+  <div class="field"><label for="status">Project status</label><select id="status"><option value="">All statuses</option></select></div>
+  <button id="reset" type="button">Reset filters</button>
+  <div class="status" id="statusText" aria-live="polite">Loading research records…</div>
+</section>
+<div class="legend"><span><i class="dot"></i>Research record with coordinates</span><span>Only records approved for public display and marked Verified in the source inventory are expected in this feed.</span></div>
+<div id="map" role="region" aria-label="Interactive research map"></div>
+<footer>
+  Map data source: the public <code>Map_Public</code> tab of the South American mCDR Research Inventory. Data are fetched when the map opens and refreshed every 5 minutes while the page remains open. Records without valid coordinates remain in the spreadsheet but cannot be plotted.
+</footer>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script>
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQPa7maeQl9KDecMmHmCAPiYHOppuG6kisoHbzzwJb2uWoftZwi0cXAi9RpXFrk1pSzKY8i7AHt3Lb_/pub?gid=1405044466&single=true&output=csv";
+const map = L.map('map', { scrollWheelZoom: true }).setView([-18, -60], 3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+const markerLayer = L.featureGroup().addTo(map);
+let records = [];
+const ids = ['country','category','approach','status'];
+const fields = { country:'country', category:'research_category', approach:'mcdr_approach', status:'project_status' };
+const $ = id => document.getElementById(id);
+const clean = v => (v ?? '').toString().trim();
+const esc = v => clean(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const first = (r, ...keys) => { for (const k of keys) if (clean(r[k])) return clean(r[k]); return ''; };
+function populateFilter(id, key) {
+  const select = $(id), previous = select.value;
+  const vals = [...new Set(records.map(r => clean(r[key])).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  select.innerHTML = `<option value="">All ${id === 'category' ? 'categories' : id === 'approach' ? 'approaches' : id === 'status' ? 'statuses' : 'countries'}</option>`;
+  vals.forEach(v => { const o=document.createElement('option'); o.value=v; o.textContent=v; select.appendChild(o); });
+  if (vals.includes(previous)) select.value=previous;
+}
+function popup(r) {
+  const title = first(r,'project_name') || 'Untitled research record';
+  const rows = [
+    ['Country / region', [first(r,'country'),first(r,'region')].filter(Boolean).join(' — ')],
+    ['Location', first(r,'location_name')],
+    ['Research category', first(r,'research_category')],
+    ['mCDR approach', first(r,'mcdr_approach')],
+    ['Contribution', first(r,'research_contribution')],
+    ['Ecosystem', first(r,'ecosystem')],
+    ['Project status', first(r,'project_status')],
+    ['Lead institution', first(r,'lead_institution')],
+    ['Collaborators', first(r,'collaborating_institutions')],
+    ['Contact', [first(r,'contact_person'),first(r,'contact_role')].filter(Boolean).join(' — ')],
+    ['Description', first(r,'short_description')],
+    ['Last verified', first(r,'last_verified')]
+  ].filter(x=>x[1]);
+  let body = `<div class="popup"><h3>${esc(title)}</h3>`;
+  rows.forEach(([k,v])=>body += `<p><strong>${esc(k)}:</strong> ${esc(v)}</p>`);
+  const url = first(r,'project_url');
+  const doi = first(r,'publication_doi');
+  if (url) body += `<p><a href="${esc(url)}" target="_blank" rel="noopener">Project website / resource</a></p>`;
+  if (doi) body += `<p><a href="${esc(/^https?:\/\//i.test(doi) ? doi : 'https://doi.org/'+doi)}" target="_blank" rel="noopener">Publication / DOI</a></p>`;
+  body += `<p class="meta">Record ID: ${esc(first(r,'record_id') || 'Not supplied')}</p></div>`;
+  return body;
+}
+function render() {
+  markerLayer.clearLayers();
+  const term = $('search').value.trim().toLowerCase();
+  let plotted = 0, matched = 0;
+  records.forEach(r => {
+    const haystack = ['project_name','short_description','lead_institution','collaborating_institutions','contact_person','location_name','country','region']
+      .map(k=>clean(r[k])).join(' ').toLowerCase();
+    if (term && !haystack.includes(term)) return;
+    for (const id of ids) if ($(id).value && clean(r[fields[id]]) !== $(id).value) return;
+    matched++;
+    const lat = Number(r.latitude), lon = Number(r.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat)>90 || Math.abs(lon)>180) return;
+    const marker = L.marker([lat,lon]).bindPopup(popup(r), {maxWidth:360});
+    marker.addTo(markerLayer); plotted++;
+  });
+  $('statusText').textContent = `${matched} matching records · ${plotted} mapped locations`;
+  if (plotted && !map._userMoved) map.fitBounds(markerLayer.getBounds().pad(0.15), {maxZoom:7});
+}
+async function loadData() {
+  $('statusText').textContent = 'Loading research records…';
+  try {
+    const response = await fetch(CSV_URL, {cache:'no-store'});
+    if (!response.ok) throw new Error(`CSV request returned HTTP ${response.status}`);
+    const csv = await response.text();
+    const parsed = Papa.parse(csv, {header:true, skipEmptyLines:true, transformHeader:h=>h.trim()});
+    if (parsed.errors.length && !parsed.data.length) throw new Error(parsed.errors[0].message);
+    records = parsed.data.map(r => Object.fromEntries(Object.entries(r).map(([k,v])=>[k.trim(),clean(v)])));
+    ids.forEach(id=>populateFilter(id,fields[id]));
+    render();
+    if (!records.length) $('statusText').textContent = 'The public sheet returned no records.';
+  } catch (err) {
+    $('statusText').innerHTML = `<span class="error">Could not load the Google Sheet: ${esc(err.message)}. Check that Map_Public is published as CSV and accessible to anyone with the link.</span>`;
+  }
+}
+ids.forEach(id=>$(id).addEventListener('change',render));
+$('search').addEventListener('input',render);
+$('reset').addEventListener('click',()=>{ $('search').value=''; ids.forEach(id=>$(id).value=''); render(); });
+map.on('movestart',()=>{map._userMoved=true;});
+loadData();
+setInterval(loadData, 5*60*1000);
+</script>
+</body>
+</html>
